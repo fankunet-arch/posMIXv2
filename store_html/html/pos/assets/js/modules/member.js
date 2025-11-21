@@ -1,4 +1,4 @@
-// store_html/html/pos/pos/assets/js/modules/member.js
+// store_html/html/pos/assets/js/modules/member.js
 // 会员模块（稳定内联提示：输入框下方 + DOM 重绘自动恢复 + 多制式请求回退）
 
 import { STATE } from '../state.js';
