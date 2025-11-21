@@ -1,0 +1,208 @@
+TopTea · L4-2B-POS-EOD-MINI 实施完成报告
+版本：v1.0
+日期：2025-11-21
+角色：TopTea 总体设计工程师（CTO 视角）
+
+一、阶段概况
+
+本报告对应审计阶段文档《L4_2B_POS_EOD_阶段报告_20251121.txt》的“实现落地”。
+
+本次 mini 修复的目标只有两件事：
+1）清理 POS Backend 中已熔断的幽灵函数 calculate_eod_totals()；
+2）让“正常关班”时写入的 pos_shifts 字段，与“强制关班”路径对齐，补齐 expected_cash / cash_variance / payment_summary。
+
+前提约束：
+- 不修改数据库 Schema；
+- 不重写 EOD 算法；
+- 不改变“EOD 仅统计 pos_invoices 财务流水”的口径；
+- 不把 0 元次卡核销拉进 EOD，本轮不做“出杯数统计”。
+
+本次开发已完成，代码推送分支：
+
+- 分支：claude/fix-pos-eod-shifts-01QCVSgCoU6ev8LKw4mbMFeh
+- Commit：397a881
+
+二、实际修改内容概览
+
+1. 删除幽灵函数 calculate_eod_totals()
+
+- 文件：store_html/pos_backend/helpers/pos_helper.php
+- 改动：
+  - 完全删除了 calculate_eod_totals() 函数定义及内部已熔断的异常逻辑。
+- 目的：
+  - 该函数曾引用不存在的 pos_invoice_payments 表，后来虽已改为 “DEPRECATED” 异常，但仍属于幽灵代码；
+  - 删除后，仓库中不再出现该符号，避免未来维护者误用。
+- 验证：
+  - 全局搜索确认无任何调用；
+  - PHP 语法检查通过。
+
+→ 对应设计文档中的 ISSUE-POS-DB-001：状态从“已熔断，待清理”升级为“已清理”。
+
+2. 补全正常关班写入字段，对齐强制关班行为
+
+核心目标：让 handle_shift_end（正常关班）写入 pos_shifts 时，补齐以下字段：
+
+- expected_cash：理论现金
+- cash_variance：实点现金与理论现金的差值
+- payment_summary：按支付方式分解的 JSON
+
+2.1 正常关班 handle_shift_end()
+
+- 文件：store_html/html/pos/api/registries/pos_registry_ops_shift.php
+- 核心改动：
+  - 读取当前班次信息（shift）和当前时间 now_utc；
+  - 调用 compute_expected_cash() 计算 expected_cash；
+  - 调用 getInvoiceSummaryForPeriod($pdo, $store_id, $shift['start_time'], $now_utc_str) 获取支付分解：
+    - $invoice_summary['payments'] 形如：{"Cash": xx, "Card": yy, "Platform": zz}
+  - 计算：
+    - cash_variance = counted_cash - expected_cash
+  - 更新 pos_shifts 时写入：
+    - end_time
+    - status='ENDED'
+    - counted_cash
+    - expected_cash
+    - cash_variance
+    - payment_summary（JSON）
+
+- 特点：
+  - 复用既有聚合函数 getInvoiceSummaryForPeriod()，不重新写 SQL；
+  - expected_cash 仍由 compute_expected_cash() 统一产出，避免破坏其他调用方。
+
+2.2 强制关班 handle_shift_force_start()
+
+- 文件：同上
+- 核心改动：
+  - 在原有逻辑基础上，同样调用 getInvoiceSummaryForPeriod() 获取 payments；
+  - payment_summary 结构与正常关班保持一致，并额外附加元数据字段：
+    - "_force_closed_by": 关闭人姓名
+    - "_force_closed_note": 简短说明，例如 "Shift was forcibly closed due to EOD cutoff"
+  - 其他字段（expected_cash / cash_variance）保持原有算法不变。
+
+- 结果：
+  - 正常关班与强制关班在 pos_shifts 中写入的核心财务字段完全对齐；
+  - 强制关班多记录了管理员信息，便于事后审计。
+
+3. 新增工具脚本 & 测试指南
+
+3.1 脏数据检查脚本（只读）
+
+- 文件：store_html/pos_backend/tools/check_shift_cash_completeness.php
+- 功能：
+  - 查询 pos_shifts 中 status='ENDED' 但以下任一字段为 NULL 的记录：
+    - expected_cash
+    - cash_variance
+    - payment_summary
+  - 输出：
+    - 每条问题班次的核心信息（shift_id, store_id, start/end_time, counted_cash 等）；
+    - 汇总统计：总班次数、不完整班次数、比例。
+- 特性：
+  - 只执行 SELECT，不修改任何数据；
+  - 幂等安全，可在测试/生产环境多次执行。
+
+3.2 测试指南
+
+- 文件：store_html/pos_backend/tools/L4_2B_POS_EOD_MINI_TESTING_GUIDE.md
+- 内容：
+  - 覆盖 6 个测试场景：
+    1）正常关班字段完整性；
+    2）正常关班 + 现金差异（长款/短款）；
+    3）强制关班路径回归；
+    4）EOD 提交流程回归（handle_eod_submit_report）；
+    5）幽灵函数删除验证（全仓 grep + 基本流程）；
+    6）脏数据检查脚本执行与结果评估。
+  - 每个场景包含：
+    - 操作步骤；
+    - 预期结果；
+    - 推荐验证 SQL。
+  - 附带一个简要的“检查清单”和常见问题排查思路。
+
+三、数据来源与计算逻辑（与设计对齐情况）
+
+1. SSOT 架构保持不变
+
+- 交易 SSOT：pos_invoices
+- 班次快照：pos_eod_records
+- 日结快照：pos_eod_reports
+
+本次改动没有动任何 Schema，也没有改动 EOD 的聚合算法，只是在“写回 pos_shifts 字段”时复用已有聚合结果。
+
+2. 关键字段计算保持对齐
+
+- expected_cash：
+  - 仍由 compute_expected_cash() 生成（不改返回结构）；
+  - 公式不在此展开，参考原实现；
+  - 仅保证正常关班也写入该值。
+
+- cash_variance：
+  - cash_variance = counted_cash - expected_cash
+  - 正数：长款；负数：短款。
+
+- payment_summary：
+  - 统一来源：getInvoiceSummaryForPeriod() 返回的 ['payments']；
+  - JSON 结构示例：
+    - 正常关班：
+      {"Cash": 23.50, "Card": 8.50, "Platform": 0.00}
+    - 强制关班：
+      {"Cash": 23.50, "Card": 8.50, "Platform": 0.00,
+       "_force_closed_by": "Admin",
+       "_force_closed_note": "Shift was forcibly closed due to EOD cutoff"}
+  - 以 "_" 前缀标记管理元数据字段，便于消费方识别/忽略。
+
+四、与审计设计的一致性检查
+
+对照《L4_2B_POS_EOD_阶段报告_20251121.txt》中给出的设计目标：
+
+1）删除幽灵函数 calculate_eod_totals()
+
+- ✅ 已完成：函数完全从 pos_helper.php 中移除；
+- ✅ 全局无引用；
+- ✅ 行为上继续由 getInvoiceSummaryForPeriod() 作为唯一聚合路径。
+
+2）补齐正常关班写入字段，与强制关班对齐
+
+- ✅ handle_shift_end 现在写入 expected_cash / cash_variance / payment_summary 三个字段；
+- ✅ 数据来源与强制关班一致，均基于 compute_expected_cash() + getInvoiceSummaryForPeriod()；
+- ✅ 强制关班多出的元数据字段采用 "_" 前缀，不影响原有支付字段。
+
+3）不改变 EOD 口径和 Schema
+
+- ✅ 没有修改任何表结构；
+- ✅ EOD 仍然只统计 pos_invoices 的财务流水，0 元次卡核销不计入；
+- ✅ 未改动 handle_eod_submit_report 和 pos_eod_reports 写入逻辑。
+
+五、风险与后续建议
+
+1. 短期风险与缓解
+
+- 性能风险：
+  - 每次关班（正常 / 强制）都会调用一次 getInvoiceSummaryForPeriod()；
+  - 鉴于该函数本身已在 EOD 中使用，且班次时间范围有限，预计可接受；
+  - 建议在测试环境关注关班接口的响应时间。
+
+- JSON 结构兼容性：
+  - 新的 payment_summary 格式与 EOD 报表侧一致；
+  - 强制关班追加的 "_force_closed_by" 等字段为新增元数据，消费方如未使用可忽略。
+
+2. 历史数据不完整问题
+
+- 本次只是提供了只读检查脚本，不做历史数据回填；
+- 建议在后续“数据迁移/清理”阶段，根据检查结果决定是否进行补写或迁移。
+
+3. 长期优化方向（非本阶段范围）
+
+- 支付方式由硬编码（Cash/Card/Platform）演进为配置化；
+- 覆盖更多索引优化（如 pos_shifts 上增加合适索引以加快报表查询）。
+
+六、阶段结论
+
+L4-2B-POS-EOD-MINI 实施阶段已完成：
+
+1）幽灵函数 calculate_eod_totals() 已彻底删除；  
+2）正常关班与强制关班在 pos_shifts 中的写入行为完成对齐，班次记录的财务字段更完整、一致；  
+3）EOD 核心算法和数据库 Schema 未被改动，完全符合“最小改动”原则；  
+4）已提供脏数据检查脚本与完整测试指南，便于在测试环境与生产环境有序验证。
+
+建议后续步骤：
+- 在测试环境严格按 L4_2B_POS_EOD_MINI_TESTING_GUIDE.md 完成 6 个测试场景；
+- 验证通过后部署到生产，并用 check_shift_cash_completeness.php 评估历史班次数据质量；
+- 如历史数据缺口较大，再单独立项设计数据回填脚本及执行计划。

@@ -1,0 +1,132 @@
+L4-2A 老线表 · Schema 粗筛 阶段报告（2025-11-21）
+
+一、基本信息
+- 阶段ID：L4-2A
+- 阶段名称：老线次卡数据表 · Schema 粗筛
+- 系统范围：跨系统（数据库层面，主要关注次卡相关表）
+- 时间范围：2025-11-20 ~ 2025-11-21
+- 参考对齐文档：
+  - 《2.4《UTC统一+ 会员_次卡体系》_进度更新版.txt》
+  - 《总对齐文档（POS 视角版）_v2.txt》
+- 输入文件：
+  - db_schema_structure_only.sql（不含数据，仅结构）
+
+二、阶段目标回顾
+本阶段（L4-2A）的目标是：
+1. 仅基于数据库结构文件（不看代码），对“与次卡相关的表”进行一次 Schema 级别的粗筛。
+2. 将这些表划分为：
+   - 新线次卡表（New Pass – Core）
+   - 新线次卡支撑/集成表（New Pass – Support/Integration）
+   - 疑似旧线次卡表（Legacy Pass – Candidate）
+   - 无法确定 / 与次卡无关的表（本阶段可以不详细列出）
+3. 为后续 L4-2B（代码引用审计）提供候选表清单和分类参考。
+
+三、实际审计结论概览
+
+基于 db_schema_structure_only.sql 的结构审计结果：
+- 在本次 Schema 快照中，未发现典型的“旧线次卡表”。
+- 所有与次卡/计次/额度显著相关的表，都可以归类为“新线模型的核心表或支撑表”。
+
+（一）新线次卡表（New Pass – Core）
+
+1. member_passes
+   - 关键字段：total_uses, remaining_uses, purchase_amount, unit_allocated_base
+   - 角色：存储会员持卡实例（每张卡一行），是次卡余额与成本分摊的核心表。
+
+2. pass_plans
+   - 关键字段：total_uses, validity_days, allocation_strategy
+   - 角色：次卡方案定义表，描述每种卡的总次数、有效期、分摊策略等。
+
+3. topup_orders
+   - 关键字段：amount_total, voucher_series, voucher_number
+   - 角色：售卡订单主表，对应 VR 凭证，记录预收款（合同负债）。
+
+4. pass_redemptions
+   - 关键字段：covered_amount, extra_charge, invoice_series
+   - 角色：单杯核销明细表，按杯记录使用次数、分摊金额和额外支付。
+
+5. pass_redemption_batches
+   - 关键字段：redeemed_uses, idempotency_key
+   - 角色：核销批次表，对应一次前台操作，可包含多杯核销，负责幂等和事务聚合。
+
+6. pass_daily_usage
+   - 关键字段：usage_date, uses_count
+   - 角色：每日用量统计表，用于执行每日上限等限制规则。
+
+（二）新线次卡支撑/集成表（New Pass – Support / Integration）
+
+1. pos_vr_counters
+   - 关键字段：vr_prefix
+   - 用途：为 topup_orders 生成 VR 凭证号，支持 VR / TP 区分。
+
+2. pos_categories
+   - 关键字段：card_bundle
+   - 用途：POS 前台分类配置，其中 card_bundle 字段用于标记“次卡售卖分类”。
+
+3. pos_tags
+   - 关键特征：tag_code（如 pass_eligible_beverage）
+   - 用途：用于标记哪些饮品/商品符合次卡使用条件，是适用范围判定的重要元数据。
+
+4. audit_logs
+   - 关键字段：action, target_type
+   - 用途：日志表中明确提及与次卡相关的操作（例如 pass.purchase, member_pass），用于操作审计。
+
+5. pos_print_templates
+   - 关键字段：template_type（包含 PASS_REDEMPTION_SLIP）
+   - 用途：为次卡核销小票（PASS_REDEMPTION_SLIP）等打印任务提供模板。
+
+（三）疑似旧线次卡表（Legacy Pass – Candidate）
+
+- 在本次提供的 db_schema_structure_only.sql 中，未发现符合以下特征的表：
+  - 命名类似旧版卡/次卡（如 member_cards, vip_usage, time_balance 等）；
+  - 结构表现出明显“次数 / 额度余额 + 有效期”模型，但与上述新线表不一致。
+
+- pos_coupons / pos_member_issued_coupons：
+  - 结构分析更偏向优惠券（Discount based）系统，与次卡（Quota/Balance based）逻辑不同；
+  - 因此本阶段将其归类为“优惠券系统”，而非旧线次卡。
+
+（四）无法判断或与次卡无关的表
+
+- 本阶段任务中未对所有非次卡表做逐一分类；
+- 大量纯业务表（商品、库存、订单等）视为与次卡无直接关系，不在本次报告中展开。
+
+四、自测与验证
+
+本阶段不涉及代码和数据，仅是 Schema 级别分析，验证方式包括：
+1. 通读 db_schema_structure_only.sql 中所有表定义；
+2. 使用命名模式和字段模式查找与次卡/卡/计次/余额相关的表；
+3. 将符合特征的表与《2.4》中的新线模型清单进行比对；
+4. 对可疑表（如 pos_coupons）进行业务语义判断，确认是否属于独立优惠券系统。
+
+五、已知问题与前提条件
+
+1. Schema 范围前提：
+   - 本次审计的范围仅限于 db_schema_structure_only.sql 中包含的结构。
+   - 如生产环境中有其他数据库/schema 或导出不完整的情况，可能存在本次审计未覆盖的表。
+
+2. 旧线表的可能位置：
+   - 如果旧线次卡表历史上存在，它们可能已在结构层面被清理；
+   - 或仅在历史备份 / 其他库中存在，不在当前 Schema 快照内。
+
+当前本阶段未发现明确问题，但有一个前提假设：
+- 假设 db_schema_structure_only.sql 能代表当前生产环境的主要业务库结构。
+
+六、阶段结论与后续建议
+
+1. 阶段结论：
+   - L4-2A（老线次卡数据表 · Schema 粗筛）可标记为：
+     - 状态：✅ 完成（基于当前 Schema 快照未发现旧线次卡表残留）。
+   - 本阶段确认：
+     - 新线次卡核心表与支撑表列表；
+     - 当前结构设计在 Schema 层面没有明显“新旧混用”的风险。
+
+2. 后续建议（L4-2B 方向）：
+   - 进入 L4-2B：代码引用审计阶段，重点检查：
+     1）在 POS / KDS / CPSYS 代码中，是否有 SQL 仍引用“不在上述新线列表中的可疑表名”；  
+     2）是否存在动态构造的表名指向旧线结构；  
+     3）确认各系统仅使用新线次卡表完成相关逻辑。
+   - 若在 2B 阶段发现代码中引用了 db_schema_structure_only.sql 中不存在的表：
+     - 说明当前结构文件可能不完整；
+     - 或环境中存在未对齐的旧线结构，需单独记录并分析。
+
+阶段状态：✅ 已完成（以当前 Schema 快照为准）
