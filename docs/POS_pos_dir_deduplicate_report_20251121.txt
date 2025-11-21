@@ -1,0 +1,35 @@
+POS Directory Deduplication Report (2025-11-21)
+================================================
+
+1. Overview
+-----------
+Objective: Align `store_html/html/pos/` (Canonical) and `store_html/html/pos/pos/` (Ghost).
+Result: `store_html/html/pos/pos/` has been completely removed. All valid files are now in `store_html/html/pos/`.
+
+2. Summary Statistics
+---------------------
+- Total Files Processed: 42
+- Type A (Canonical Only): 0
+- Type B (Ghost Only): 0
+- Type C (Identical): 39 (Ghost copies deleted)
+- Type D (Different): 3
+
+3. Type D Resolution Details
+----------------------------
+Three files existed in both locations with different content. Decisions were made based on the presence of critical "B1" logic (Payment Validation) vs i18n logic.
+
+| Relative Path | Action | Reason |
+|---|---|---|
+| `api/registries/pos_registry_ext_pass.php` | Overwrite Canonical with Ghost | Ghost contained critical `[B1-PASS-REVIEW-AND-PAYMENT-MINI]` validation logic. |
+| `assets/js/modules/payment.js` | Overwrite Canonical with Ghost | Ghost contained critical `[B1-PASS-REVIEW-AND-PAYMENT-MINI]` logic. **Trade-off:** Canonical's `[POS-PASS-I18N-NAME-MINI]` logic was overwritten/lost in this file to prioritize security/compliance. |
+| `assets/js/modules/discountCard.js` | Keep Canonical, Delete Ghost | Canonical contained newer `[POS-PASS-I18N-NAME-MINI]` logic. Ghost did not have any unique B1 logic. |
+
+4. Technical Debt / Notes
+-------------------------
+- **Lost Feature**: `assets/js/modules/payment.js` lost the `[POS-PASS-I18N-NAME-MINI]` block (i18n name display) in favor of the critical payment validation logic. This should be manually re-implemented in a future task if needed.
+- **Clean State**: The repository no longer contains the nested `pos/pos/` directory.
+
+5. Code References
+------------------
+- References to `html/pos/pos/` in comments (e.g., `assets/js/modules/member.js`) were noted but not modified as they are non-functional.
+- No active code references to the Ghost directory were found.
